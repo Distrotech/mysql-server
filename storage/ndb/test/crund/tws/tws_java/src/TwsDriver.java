@@ -65,15 +65,17 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 
 import java.util.Properties;
+import java.util.List;
+import java.util.ArrayList;
 
-public class Main
+public class TwsDriver
 {
     // console
     static protected final PrintWriter out = new PrintWriter(System.out, true);
     static protected final PrintWriter err = new PrintWriter(System.err, true);
 
     // command-line arguments
-    static protected String propsFileName;
+    static private final List<String> propFileNames = new ArrayList<String>();
     static protected String logFileName;
 
     // benchmark settings
@@ -156,9 +158,10 @@ public class Main
     protected int width_c12;
     protected int width_c13;
     protected int width_c14;
+    protected int width_row; // sum of {width_c0 .. width_c14}
 
     // NDB JTie data resources
-    protected ByteBuffer bb_r;
+    protected ByteBuffer bb;
 
     // NDB JTie static resources
     static protected final ByteOrder bo = ByteOrder.nativeOrder();
@@ -182,7 +185,7 @@ public class Main
 
     static public void main(String[] args) throws SQLException, IOException {
         parseArguments(args);
-        Main main = new Main();
+        TwsDriver main = new TwsDriver();
         main.run();
     }
 
@@ -227,6 +230,8 @@ public class Main
 
     protected void init() throws IOException, SQLException {
         loadProperties();
+        initProperties();
+        printProperties();
         // XXX openLogFile();
 
         // XXX init log buffers
@@ -261,17 +266,27 @@ public class Main
 
     // ----------------------------------------------------------------------
 
-    protected void loadProperties() throws IOException {
-        out.println("reading properties file:        " + propsFileName);
-        InputStream is = null;
-        try {
-            is = new FileInputStream(propsFileName);
-            props.load(is);
-        } finally {
-            if (is != null)
-                is.close();
+    // loads the benchmark's properties from properties files
+    private void loadProperties() throws IOException {
+        out.println();
+        for (String fn : propFileNames) {
+            out.println("reading properties file:        " + fn);
+            InputStream is = null;
+            try {
+                is = new FileInputStream(fn);
+                props.load(is);
+            } finally {
+                if (is != null)
+                    is.close();
+            }
         }
+    }
+
+    // initializes the benchmark properties
+    protected void initProperties() {
         //props.list(out);
+        out.print("setting driver properties ...");
+        out.flush();
 
         out.print("initializing properties ...");
         final StringBuilder msg = new StringBuilder();        
@@ -287,9 +302,29 @@ public class Main
         doSingle = parseBoolean("doSingle", false);
         doBulk = parseBoolean("doBulk", false);
         doBatch = parseBoolean("doBatch", false);
-        lockMode = parseLockMode("lockMode", LockMode.READ_COMMITTED);
-        nRows = parseInt("nRows", 50000);
-        nRuns = parseInt("nRuns", 5);
+
+        final String lm = props.getProperty("lockMode");
+        try {
+            lockMode = (lm == null
+                        ? LockMode.READ_COMMITTED : LockMode.valueOf(lm));
+        } catch (IllegalArgumentException e) {
+            msg.append("[ignored] lockMode:             " + lm + eol);
+            lockMode = LockMode.READ_COMMITTED;
+        }
+
+        nRows = parseInt("nRows", 256);
+        if (nRows < 1) {
+            msg.append("[ignored] nRows:            '"
+                       + props.getProperty("nRows") + "'" + eol);
+            nRows = 256;
+        }
+
+        nRuns = parseInt("nRuns", 1);
+        if (nRuns < 1) {
+            msg.append("[ignored] nRuns:            '"
+                       + props.getProperty("nRuns") + "'" + eol);
+            nRuns = 1;
+        }
 
         if (msg.length() == 0) {
             out.println("     [ok]");
@@ -297,9 +332,12 @@ public class Main
             out.println();
             out.print(msg.toString());
         }
-
+    }
+    
+    // prints the benchmark's properties
+    protected void printProperties() {
         out.println();
-        out.println("main settings ...");
+        out.println("driver settings ...");
         out.println("doJdbc:                         " + doJdbc);
         out.println("doClusterj:                     " + doClusterj);
         out.println("doNdbjtie:                      " + doNdbjtie);
@@ -330,19 +368,6 @@ public class Main
                 + v + "').");
             nfe.initCause(e);
             throw nfe;
-        }
-    }
-
-    protected LockMode parseLockMode(String k, LockMode vdefault) {
-        final String v = props.getProperty(k);
-        try {
-            return (v == null ? vdefault : LockMode.valueOf(v));
-        } catch (IllegalArgumentException e) {
-            final IllegalArgumentException iae = new IllegalArgumentException(
-                "invalid value of benchmark property ('" + k + "', '"
-                + v + "').");
-            iae.initCause(e);
-            throw iae;
         }
     }
 
@@ -438,7 +463,7 @@ public class Main
         assert (del0 == null);
 
         out.print("using lock mode for reads ...");
-        out.flush;
+        out.flush();
         final String lm;
         switch (lockMode) {
         case READ_COMMITTED:
@@ -607,12 +632,12 @@ public class Main
         }
         out.println("      [ok: " + catalog + "." + schema + "]");
 
-        initNdbjtieMeta();
+        initNdbjtieModel();
 
         initNdbjtieBuffers();
 
         out.print("using lock mode for reads ...");
-        out.flush;
+        out.flush();
         final String lm;
         switch (lockMode) {
         case READ_COMMITTED:
@@ -644,7 +669,7 @@ public class Main
 
         closeNdbjtieBuffers();
 
-        closeNdbjtieMeta();
+        closeNdbjtieModel();
 
         out.print("closing database connection ...");
         out.flush();
@@ -654,13 +679,12 @@ public class Main
 
         out.print("closing cluster connection ...");
         out.flush();
-        if (mgmd != null)
-            Ndb_cluster_connection.delete(mgmd);
+        Ndb_cluster_connection.delete(mgmd);
         mgmd = null;
         out.println("  [ok]");
     }
 
-    protected void initNdbjtieMeta() {
+    protected void initNdbjtieModel() {
         assert (ndb != null);
         assert (table_t0 == null);
         assert (column_c0 == null);
@@ -736,32 +760,33 @@ public class Main
         width_c13 = ndbjtieColumnWidth(column_c13);
         width_c14 = ndbjtieColumnWidth(column_c14);
 
+        width_row = (
+            + width_c0
+            + width_c1
+            + width_c2
+            + width_c3
+            + width_c4
+            + width_c5
+            + width_c6
+            + width_c7
+            + width_c8
+            + width_c9
+            + width_c10
+            + width_c11
+            + width_c12
+            + width_c13
+            + width_c14);
+
         out.println("            [ok]");
     }
 
-    protected void closeNdbjtieMeta() {
+    protected void closeNdbjtieModel() {
         assert (ndb != null);
         assert (table_t0 != null);
         assert (column_c0 != null);
 
         out.print("clearing metadata cache...");
         out.flush();
-
-        width_c14 = 0;
-        width_c13 = 0;
-        width_c12 = 0;
-        width_c11 = 0;
-        width_c10 = 0;
-        width_c9 = 0;
-        width_c8 = 0;
-        width_c7 = 0;
-        width_c6 = 0;
-        width_c5 = 0;
-        width_c4 = 0;
-        width_c3 = 0;
-        width_c2 = 0;
-        width_c1 = 0;
-        width_c0 = 0;
 
         column_c14 = null;
         column_c13 = null;
@@ -786,45 +811,27 @@ public class Main
 
     protected void initNdbjtieBuffers() {
         assert (column_c0 != null);
-        assert (bb_r == null);
+        assert (bb == null);
 
         out.print("allocating buffers...");
         out.flush();
 
-        final int width_row = (
-            + width_c0
-            + width_c1
-            + width_c2
-            + width_c3
-            + width_c4
-            + width_c5
-            + width_c6
-            + width_c7
-            + width_c8
-            + width_c9
-            + width_c10
-            + width_c11
-            + width_c12
-            + width_c13
-            + width_c14);
-
-        //bb_r = ByteBuffer.allocateDirect(width_row);
-        bb_r = ByteBuffer.allocateDirect(width_row * nRows);
+        bb = ByteBuffer.allocateDirect(width_row * nRows);
 
         // initial order of a byte buffer is always BIG_ENDIAN
-        bb_r.order(bo);
+        bb.order(bo);
 
         out.println("           [ok]");
     }
 
     protected void closeNdbjtieBuffers() {
         assert (column_c0 != null);
-        assert (bb_r != null);
+        assert (bb != null);
 
         out.print("releasing buffers...");
         out.flush();
 
-        bb_r = null;
+        bb = null;
 
         out.println("            [ok]");
     }
@@ -857,9 +864,9 @@ public class Main
     }
 
     static protected int ndbjtieColumnWidth(ColumnConst c) {
-        final int s = c.getSize(); // size of type or of base type
-        final int al = c.getLength(); // length or max length, 1 for scalars
-        final int at = c.getArrayType(); // size of length prefix, practically
+        int s = c.getSize(); // size of type or of base type
+        int al = c.getLength(); // length or max length, 1 for scalars
+        int at = c.getArrayType(); // size of length prefix, practically
         return (s * al) + at;
     }
 
@@ -1088,16 +1095,16 @@ public class Main
         try {
             // set values; key attribute needs to be set first
             //str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.equal(attr_c0, bb_r) != 0) // key
+            ndbjtieTranscode(bb, str);
+            if (op.equal(attr_c0, bb) != 0) // key
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c0);
+            bb.position(bb.position() + width_c0);
 
             str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.setValue(attr_c1, bb_r) != 0)
+            ndbjtieTranscode(bb, str);
+            if (op.setValue(attr_c1, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c1);
+            bb.position(bb.position() + width_c1);
 
             if (op.setValue(attr_c2, i) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
@@ -1105,29 +1112,52 @@ public class Main
             if (op.setValue(attr_c3, i) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
 
-            str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.setValue(attr_c5, bb_r) != 0)
+            // XXX
+            if (op.setValue(attr_c4, null) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c5);
 
             str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.setValue(attr_c6, bb_r) != 0)
+            ndbjtieTranscode(bb, str);
+            if (op.setValue(attr_c5, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c6);
+            bb.position(bb.position() + width_c5);
 
             str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.setValue(attr_c7, bb_r) != 0)
+            ndbjtieTranscode(bb, str);
+            if (op.setValue(attr_c6, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c7);
+            bb.position(bb.position() + width_c6);
 
             str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.setValue(attr_c8, bb_r) != 0)
+            ndbjtieTranscode(bb, str);
+            if (op.setValue(attr_c7, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c8);
+            bb.position(bb.position() + width_c7);
+
+            str.rewind();
+            ndbjtieTranscode(bb, str);
+            if (op.setValue(attr_c8, bb) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+            bb.position(bb.position() + width_c8);
+
+            // XXX
+            if (op.setValue(attr_c9, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+
+            if (op.setValue(attr_c10, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+
+            if (op.setValue(attr_c11, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+
+            if (op.setValue(attr_c12, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+
+            if (op.setValue(attr_c13, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
+
+            if (op.setValue(attr_c14, null) != 0)
+                throw new RuntimeException(toStr(tx.getNdbError()));
         } catch (CharacterCodingException e) {
             throw new RuntimeException(e);
         }
@@ -1183,8 +1213,8 @@ public class Main
                 ndbjtieBeginTransaction();
                 ndbjtieLookup(i);
                 ndbjtieCommitTransaction();
-                ndbjtieCloseTransaction();
                 ndbjtieRead(i);
+                ndbjtieCloseTransaction();
             }
         } else {
             ndbjtieBeginTransaction();
@@ -1195,10 +1225,10 @@ public class Main
                     ndbjtieExecuteTransaction();
             }
             ndbjtieCommitTransaction();
-            ndbjtieCloseTransaction();
             for(int i = 0; i < nRows; i++) {
                 ndbjtieRead(i);
             }
+            ndbjtieCloseTransaction();
         }
         time += System.currentTimeMillis();
 
@@ -1268,109 +1298,111 @@ public class Main
         if (op.readTuple(ndbOpLockMode) != 0)
             throw new RuntimeException(toStr(tx.getNdbError()));
 
-        int p = bb_r.position();
+        int p = bb.position();
 
         // include exception handling as part of transcoding pattern
         final CharBuffer str = CharBuffer.wrap(Integer.toString(c0));
         try {
             // set values; key attribute needs to be set first
             //str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.equal(attr_c0, bb_r) != 0) // key
+            ndbjtieTranscode(bb, str);
+            if (op.equal(attr_c0, bb) != 0) // key
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(p += width_c0);
+            bb.position(p += width_c0);
         } catch (CharacterCodingException e) {
             throw new RuntimeException(e);
         }
 
         // get attributes (not readable until after commit)
-        if (op.getValue(attr_c1, bb_r) == null)
+        if (op.getValue(attr_c1, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c1);
-        if (op.getValue(attr_c2, bb_r) == null)
+        bb.position(p += width_c1);
+        if (op.getValue(attr_c2, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c2);
-        if (op.getValue(attr_c3, bb_r) == null)
+        bb.position(p += width_c2);
+        if (op.getValue(attr_c3, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c3);
-        if (op.getValue(attr_c4, bb_r) == null)
+        bb.position(p += width_c3);
+        if (op.getValue(attr_c4, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c4);
-        if (op.getValue(attr_c5, bb_r) == null)
+        bb.position(p += width_c4);
+        if (op.getValue(attr_c5, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c5);
-        if (op.getValue(attr_c6, bb_r) == null)
+        bb.position(p += width_c5);
+        if (op.getValue(attr_c6, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c6);
-        if (op.getValue(attr_c7, bb_r) == null)
+        bb.position(p += width_c6);
+        if (op.getValue(attr_c7, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c7);
-        if (op.getValue(attr_c8, bb_r) == null)
+        bb.position(p += width_c7);
+        if (op.getValue(attr_c8, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c8);
-        if (op.getValue(attr_c9, bb_r) == null)
+        bb.position(p += width_c8);
+        if (op.getValue(attr_c9, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c9);
-        if (op.getValue(attr_c10, bb_r) == null)
+        bb.position(p += width_c9);
+        if (op.getValue(attr_c10, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c10);
-        if (op.getValue(attr_c11, bb_r) == null)
+        bb.position(p += width_c10);
+        if (op.getValue(attr_c11, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c11);
-        if (op.getValue(attr_c12, bb_r) == null)
+        bb.position(p += width_c11);
+        if (op.getValue(attr_c12, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c12);
-        if (op.getValue(attr_c13, bb_r) == null)
+        bb.position(p += width_c12);
+        if (op.getValue(attr_c13, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c13);
-        if (op.getValue(attr_c14, bb_r) == null)
+        bb.position(p += width_c13);
+        if (op.getValue(attr_c14, bb) == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
-        bb_r.position(p += width_c14);
+        bb.position(p += width_c14);
     }
 
     protected void ndbjtieRead(int c0) {
         // include exception handling as part of transcoding pattern
-        final int i = c0;
-        final CharBuffer str = CharBuffer.wrap(Integer.toString(i));
-        assert (str.position() == 0);
+        //final int i = c0;
+        //final CharBuffer str = CharBuffer.wrap(Integer.toString(i));
+        //assert (str.position() == 0);
 
         try {
-            int p = bb_r.position();
-            bb_r.position(p += width_c0);
+            int p = bb.position();
+            bb.position(p += width_c0);
 
             // not verifying at this time
             // (str.equals(ndbjtieTranscode(bb_c1)));
             // (i == bb_c2.asIntBuffer().get());
-            CharBuffer y = ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c1);
+            //CharBuffer y = ndbjtieTranscode(bb);
 
-            bb_r.asIntBuffer().get();
-            bb_r.position(p += width_c2);
-            bb_r.asIntBuffer().get();
-            bb_r.position(p += width_c3);
-            bb_r.asIntBuffer().get();
-            bb_r.position(p += width_c4);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c1);
 
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c5);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c6);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c7);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c8);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c9);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c10);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c11);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c12);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c13);
-            ndbjtieTranscode(bb_r);
-            bb_r.position(p += width_c14);
+            bb.asIntBuffer().get();
+            bb.position(p += width_c2);
+            bb.asIntBuffer().get();
+            bb.position(p += width_c3);
+            bb.asIntBuffer().get();
+            bb.position(p += width_c4);
+
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c5);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c6);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c7);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c8);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c9);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c10);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c11);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c12);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c13);
+            ndbjtieTranscode(bb);
+            bb.position(p += width_c14);
         } catch (CharacterCodingException e) {
             throw new RuntimeException(e);
         }
@@ -1510,16 +1542,16 @@ public class Main
         try {
             // set values; key attribute needs to be set first
             //str0.rewind();
-            ndbjtieTranscode(bb_r, str0);
-            if (op.equal(attr_c0, bb_r) != 0) // key
+            ndbjtieTranscode(bb, str0);
+            if (op.equal(attr_c0, bb) != 0) // key
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c0);
+            bb.position(bb.position() + width_c0);
 
             //str1.rewind();
-            ndbjtieTranscode(bb_r, str1);
-            if (op.setValue(attr_c1, bb_r) != 0)
+            ndbjtieTranscode(bb, str1);
+            if (op.setValue(attr_c1, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c1);
+            bb.position(bb.position() + width_c1);
 
             if (op.setValue(attr_c2, r) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
@@ -1528,28 +1560,28 @@ public class Main
                 throw new RuntimeException(toStr(tx.getNdbError()));
 
             str1.rewind();
-            ndbjtieTranscode(bb_r, str1);
-            if (op.setValue(attr_c5, bb_r) != 0)
+            ndbjtieTranscode(bb, str1);
+            if (op.setValue(attr_c5, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c5);
+            bb.position(bb.position() + width_c5);
 
             str1.rewind();
-            ndbjtieTranscode(bb_r, str1);
-            if (op.setValue(attr_c6, bb_r) != 0)
+            ndbjtieTranscode(bb, str1);
+            if (op.setValue(attr_c6, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c6);
+            bb.position(bb.position() + width_c6);
 
             str1.rewind();
-            ndbjtieTranscode(bb_r, str1);
-            if (op.setValue(attr_c7, bb_r) != 0)
+            ndbjtieTranscode(bb, str1);
+            if (op.setValue(attr_c7, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c7);
+            bb.position(bb.position() + width_c7);
 
             str1.rewind();
-            ndbjtieTranscode(bb_r, str1);
-            if (op.setValue(attr_c8, bb_r) != 0)
+            ndbjtieTranscode(bb, str1);
+            if (op.setValue(attr_c8, bb) != 0)
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(bb_r.position() + width_c8);
+            bb.position(bb.position() + width_c8);
         } catch (CharacterCodingException e) {
             throw new RuntimeException(e);
         }
@@ -1645,14 +1677,14 @@ public class Main
     }
 
     protected void ndbjtieDelete(int c0) {
-        // get an delete operation for the table
+        // get a delete operation for the table
         NdbOperation op = tx.getNdbOperation(table_t0);
         if (op == null)
             throw new RuntimeException(toStr(tx.getNdbError()));
         if (op.deleteTuple() != 0)
             throw new RuntimeException(toStr(tx.getNdbError()));
 
-        int p = bb_r.position();
+        int p = bb.position();
 
         // include exception handling as part of transcoding pattern
         final int i = c0;
@@ -1660,10 +1692,10 @@ public class Main
         try {
             // set values; key attribute needs to be set first
             //str.rewind();
-            ndbjtieTranscode(bb_r, str);
-            if (op.equal(attr_c0, bb_r) != 0) // key
+            ndbjtieTranscode(bb, str);
+            if (op.equal(attr_c0, bb) != 0) // key
                 throw new RuntimeException(toStr(tx.getNdbError()));
-            bb_r.position(p += width_c0);
+            bb.position(p += width_c0);
         } catch (CharacterCodingException e) {
             throw new RuntimeException(e);
         }
@@ -1675,7 +1707,7 @@ public class Main
         assert (tx == null);
 
         // prepare buffer for writing
-        bb_r.clear();
+        bb.clear();
 
         // start a transaction
         // must be closed with NdbTransaction.close
@@ -1708,18 +1740,9 @@ public class Main
         if (tx.execute(execType, abortOption, force) != 0
             || tx.getNdbError().status() != NdbError.Status.Success)
             throw new RuntimeException(toStr(tx.getNdbError()));
-    }
 
-    protected void ndbjtieRollbackTransaction() {
-        assert (tx != null);
-
-        // abort the current transaction
-        final int execType = NdbTransaction.ExecType.Rollback;
-        final int abortOption = NdbOperation.AbortOption.DefaultAbortOption;
-        final int force = 0;
-        if (tx.execute(execType, abortOption, force) != 0
-            || tx.getNdbError().status() != NdbError.Status.Success)
-            throw new RuntimeException(toStr(tx.getNdbError()));
+        // prepare buffer for reading
+        bb.rewind();
     }
 
     protected void ndbjtieCloseTransaction() {
@@ -1728,9 +1751,6 @@ public class Main
         // close the current transaction (required after commit, rollback)
         ndb.closeTransaction(tx);
         tx = null;
-
-        // prepare buffer for reading
-        bb_r.rewind();
     }
 
     // ----------------------------------------------------------------------

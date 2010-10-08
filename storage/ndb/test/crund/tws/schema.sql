@@ -23,9 +23,11 @@ CREATE  TABLE IF NOT EXISTS testdb.mytable (
         c13 CHAR        NULL,
         c14 VARCHAR(34) NULL,
         PRIMARY KEY (c0),
-        UNIQUE INDEX c0_UNIQUE USING BTREE (c0 ASC),
-        UNIQUE INDEX c1_UNIQUE USING BTREE (c1 ASC),
-        UNIQUE INDEX c2_UNIQUE (c2 ASC),
-        UNIQUE INDEX c7_UNIQUE (c7 ASC),
-        UNIQUE INDEX c8_UNIQUE (c8 ASC)
+        UNIQUE INDEX c0_UNIQUE USING BTREE (c0 ASC)
+-- "Job buffer congestion" crashes with node failure with unique indexes
+-- http://bugs.mysql.com/bug.php?id=56552
+--        UNIQUE INDEX c1_UNIQUE USING BTREE (c1 ASC),
+--        UNIQUE INDEX c2_UNIQUE (c2 ASC),
+--        UNIQUE INDEX c7_UNIQUE (c7 ASC),
+--        UNIQUE INDEX c8_UNIQUE (c8 ASC)
 );
